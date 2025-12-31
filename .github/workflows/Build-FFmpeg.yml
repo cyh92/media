@@ -97,7 +97,9 @@ jobs:
       run: |
         ls
         ./gradlew :libraries:decoder_ffmpeg:assembleRelease \
-          -Pandroid.disableBuildConfig=true
+        -Pandroid.disableBuildConfig=true \
+        --stacktrace \
+        --info
    
     
     - name: Upload artifacts
