@@ -28,21 +28,21 @@ jobs:
         fetch-depth: 0
 
     - name: Cache NDK
-      uses: actions/cache@v3
+      uses: actions/cache@v4  # 更新到v4版本
       id: cache-ndk
       with:
         path: android-ndk-${{ env.NDK_VERSION }}
         key: ndk-${{ env.NDK_VERSION }}
 
     - name: Cache FFmpeg
-      uses: actions/cache@v3
+      uses: actions/cache@v4  # 更新到v4版本
       id: cache-ffmpeg
       with:
         path: ffmpeg
         key: ffmpeg-${{ env.FFMPEG_VERSION }}-${{ hashFiles('**/build_ffmpeg.sh') }}
 
     - name: Set up JDK 17
-      uses: actions/setup-java@v3
+      uses: actions/setup-java@v4  # 更新到最新版本
       with:
         distribution: 'temurin'
         java-version: '17'
@@ -109,7 +109,7 @@ jobs:
         ./gradlew :libraries:decoder_ffmpeg:testReleaseUnitTest
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4  # 更新到v4版本
       with:
         name: ffmpeg-decoder-build
         path: |
