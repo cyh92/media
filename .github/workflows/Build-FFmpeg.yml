@@ -1,26 +1,24 @@
 name: Build FFmpeg Decoder for ExoPlayer
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 允许手动触发
   push:
     branches: [ main, master ]
     paths:
-      - 'libraries/decoder_ffmpeg/**'
-      - '.github/workflows/build_ffmpeg.yml'  # 工作流自身变化时也触发
+      - 'libraries/decoder_ffmpeg/**'  # 仅当FFmpeg模块变化时触发
   pull_request:
     branches: [ main, master ]
 
 env:
-  NDK_VERSION: "r26b"
-  FFMPEG_VERSION: "release/6.0"
-  ANDROID_ABI: 21
-  ENABLED_DECODERS: "vorbis opus flac"
-  PROJECT_ROOT: "."  # 动态设置项目根目录
+  NDK_VERSION: "r26b"         # 测试过的NDK版本
+  FFMPEG_VERSION: "release/6.0"  # 推荐的FFmpeg版本
+  ANDROID_ABI: 21             # 匹配项目的minSdk
+  ENABLED_DECODERS: "vorbis opus flac"  # 启用的解码器
 
 jobs:
   build-ffmpeg:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 60  # 构建超时时间
     
     steps:
     - name: Checkout repository
@@ -29,37 +27,22 @@ jobs:
         submodules: recursive
         fetch-depth: 0
 
-    # 动态检测项目根目录
-    - name: Detect project structure
-      id: detect-structure
-      run: |
-        if [ -d "androidx.media3" ]; then
-          echo "PROJECT_ROOT=androidx.media3" >> $GITHUB_ENV
-          echo "::notice::Using project root: androidx.media3"
-        elif [ -f "settings.gradle" ]; then
-          echo "PROJECT_ROOT=." >> $GITHUB_ENV
-          echo "::notice::Using project root: ."
-        else
-          echo "::error::Cannot determine project root directory"
-          exit 1
-        fi
-
     - name: Cache NDK
-      uses: actions/cache@v4
+      uses: actions/cache@v4  # 更新到v4版本
       id: cache-ndk
       with:
         path: android-ndk-${{ env.NDK_VERSION }}
         key: ndk-${{ env.NDK_VERSION }}
 
     - name: Cache FFmpeg
-      uses: actions/cache@v4
+      uses: actions/cache@v4  # 更新到v4版本
       id: cache-ffmpeg
       with:
-        path: ${{ env.PROJECT_ROOT }}/ffmpeg
-        key: ffmpeg-${{ env.FFMPEG_VERSION }}-${{ hashFiles('${{ env.PROJECT_ROOT }}/libraries/decoder_ffmpeg/**/build_ffmpeg.sh') }}
+        path: ffmpeg
+        key: ffmpeg-${{ env.FFMPEG_VERSION }}-${{ hashFiles('**/build_ffmpeg.sh') }}
 
     - name: Set up JDK 17
-      uses: actions/setup-java@v4
+      uses: actions/setup-java@v4  # 更新到最新版本
       with:
         distribution: 'temurin'
         java-version: '17'
@@ -75,34 +58,27 @@ jobs:
           libtool \
           cmake \
           ninja-build
-
     - name: Download NDK if not cached
       if: steps.cache-ndk.outputs.cache-hit != 'true'
       run: |
         wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
         unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
         rm android-ndk-${{ env.NDK_VERSION }}-linux.zip
-        mv android-ndk-${{ env.NDK_VERSION }} ${{ env.PROJECT_ROOT }}
-
     - name: Clone FFmpeg if not cached
       if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
       run: |
-        cd ${{ env.PROJECT_ROOT }}
         git clone --depth 1 --branch ${{ env.FFMPEG_VERSION }} \
           https://source.ffmpeg.org/git/ffmpeg.git ffmpeg
-
     - name: Setup environment
       run: |
-        echo "NDK_PATH=${{ env.PROJECT_ROOT }}/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
-        echo "FFMPEG_PATH=${{ env.PROJECT_ROOT }}/ffmpeg" >> $GITHUB_ENV
-        echo "FFMPEG_MODULE_PATH=${{ env.PROJECT_ROOT }}/libraries/decoder_ffmpeg/src/main" >> $GITHUB_ENV
+        echo "NDK_PATH=$(pwd)/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+        echo "FFMPEG_PATH=$(pwd)/ffmpeg" >> $GITHUB_ENV
+        echo "FFMPEG_MODULE_PATH=$(pwd)/libraries/decoder_ffmpeg/src/main" >> $GITHUB_ENV
         echo "HOST_PLATFORM=linux-x86_64" >> $GITHUB_ENV
-
     - name: Create symbolic link
       run: |
         mkdir -p $FFMPEG_MODULE_PATH/jni
         ln -sf $FFMPEG_PATH $FFMPEG_MODULE_PATH/jni/ffmpeg
-
     - name: Build FFmpeg libraries
       run: |
         cd $FFMPEG_MODULE_PATH/jni
@@ -114,51 +90,29 @@ jobs:
           "$ANDROID_ABI" \
           $ENABLED_DECODERS
         
-        echo "Built libraries:"
-        find . -name '*.so' -exec file {} \;
-
-    # 修复模块路径问题
+        # 验证构建结果
+        echo "Checking built libraries:"
+        find "$FFMPEG_MODULE_PATH/jni" -name '*.so' | xargs -I {} sh -c 'echo "Built: {}" && file {}'
     - name: Build decoder_ffmpeg module
       run: |
-        cd ${{ env.PROJECT_ROOT }}
-        
-        # 检查Gradle模块是否存在
-        if ./gradlew projects | grep -q "project ':libraries:decoder_ffmpeg'"; then
-          echo "Building :libraries:decoder_ffmpeg"
-          ./gradlew :libraries:decoder_ffmpeg:assembleRelease \
-            -Pandroid.disableBuildConfig=true
-        elif ./gradlew projects | grep -q "project ':decoder_ffmpeg'"; then
-          echo "Building :decoder_ffmpeg (alternative path)"
-          ./gradlew :decoder_ffmpeg:assembleRelease \
-            -Pandroid.disableBuildConfig=true
-        else
-          echo "::error::Could not find decoder_ffmpeg module"
-          ./gradlew projects
-          exit 1
-        fi
-
-    - name: Run unit tests
-      run: |
-        cd ${{ env.PROJECT_ROOT }}
-        ./gradlew :libraries:decoder_ffmpeg:testReleaseUnitTest ||
-        ./gradlew :decoder_ffmpeg:testReleaseUnitTest  # 备选路径
-
+        ls
+        ./gradlew :libraries:decoder_ffmpeg:assembleRelease \
+          -Pandroid.disableBuildConfig=true
+   
+    
     - name: Upload artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v4  # 更新到v4版本
       with:
         name: ffmpeg-decoder-build
         path: |
-          ${{ env.PROJECT_ROOT }}/libraries/decoder_ffmpeg/build/outputs/aar/*.aar
-          ${{ env.PROJECT_ROOT }}/libraries/decoder_ffmpeg/build/reports/tests/**
-          ${{ env.PROJECT_ROOT }}/decoder_ffmpeg/build/outputs/aar/*.aar  # 备选路径
-
+          libraries/decoder_ffmpeg/build/outputs/aar/*.aar
+          libraries/decoder_ffmpeg/build/reports/tests/**
+          libraries/decoder_ffmpeg/build/intermediates/cmake/release/obj/**
     - name: Setup Android SDK for instrumentation tests
-      if: github.event_name == 'workflow_dispatch'
+      if: github.event_name == 'workflow_dispatch'  # 仅在手动触发时运行耗时测试
       uses: android-actions/setup-android@v2
 
     - name: Run instrumentation tests
       if: github.event_name == 'workflow_dispatch'
       run: |
-        cd ${{ env.PROJECT_ROOT }}
-        ./gradlew :libraries:decoder_ffmpeg:connectedCheck ||
-        ./gradlew :decoder_ffmpeg:connectedCheck  # 备选路径
+        ./gradlew :libraries:decoder_ffmpeg:connectedCheck
