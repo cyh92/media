@@ -16,6 +16,7 @@
 package androidx.media3.session.legacy;
 
 import static androidx.annotation.RestrictTo.Scope.LIBRARY;
+import static androidx.media3.common.util.Util.convertToNullIfInvalid;
 
 import android.annotation.SuppressLint;
 import android.graphics.Bitmap;
@@ -363,27 +364,30 @@ public final class MediaDescriptionCompat implements Parcelable {
     bob.setDescription(description.getDescription());
     bob.setIconBitmap(description.getIconBitmap());
     bob.setIconUri(description.getIconUri());
-    Bundle extras = description.getExtras();
-    extras = MediaSessionCompat.unparcelWithClassLoader(extras);
-    if (extras != null) {
-      extras = new Bundle(extras);
-    }
+    Bundle extras = convertToNullIfInvalid(description.getExtras());
     Uri mediaUri = null;
     if (extras != null) {
-      mediaUri = extras.getParcelable(DESCRIPTION_KEY_MEDIA_URI);
-      if (mediaUri != null) {
-        if (extras.containsKey(DESCRIPTION_KEY_NULL_BUNDLE_FLAG) && extras.size() == 2) {
-          // The extras were only created for the media URI, so we set it back to null to
-          // ensure mediaDescriptionCompat.getExtras() equals
-          // fromMediaDescription(getMediaDescription(mediaDescriptionCompat)).getExtras()
-          extras = null;
-        } else {
-          // Remove media URI keys to ensure mediaDescriptionCompat.getExtras().keySet()
-          // equals fromMediaDescription(getMediaDescription(mediaDescriptionCompat))
-          // .getExtras().keySet()
-          extras.remove(DESCRIPTION_KEY_MEDIA_URI);
-          extras.remove(DESCRIPTION_KEY_NULL_BUNDLE_FLAG);
+      try {
+        extras = new Bundle(extras);
+        mediaUri = extras.getParcelable(DESCRIPTION_KEY_MEDIA_URI);
+        if (mediaUri != null) {
+          if (extras.containsKey(DESCRIPTION_KEY_NULL_BUNDLE_FLAG) && extras.size() == 2) {
+            // The extras were only created for the media URI, so we set it back to null to
+            // ensure mediaDescriptionCompat.getExtras() equals
+            // fromMediaDescription(getMediaDescription(mediaDescriptionCompat)).getExtras()
+            extras = null;
+          } else {
+            // Remove media URI keys to ensure mediaDescriptionCompat.getExtras().keySet()
+            // equals fromMediaDescription(getMediaDescription(mediaDescriptionCompat))
+            // .getExtras().keySet()
+            extras.remove(DESCRIPTION_KEY_MEDIA_URI);
+            extras.remove(DESCRIPTION_KEY_NULL_BUNDLE_FLAG);
+          }
         }
+      } catch (RuntimeException e) {
+        Log.w(TAG, "Failed to parse extras", e);
+        extras = null;
+        mediaUri = null;
       }
     }
     bob.setExtras(extras);

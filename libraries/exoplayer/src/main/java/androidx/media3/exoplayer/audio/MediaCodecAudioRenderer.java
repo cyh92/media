@@ -40,6 +40,7 @@ import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.AuxEffectInfo;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
+import androidx.media3.common.MediaLibraryInfo;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.PlaybackParameters;
@@ -71,6 +72,7 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecUtil;
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil.DecoderQueryException;
 import androidx.media3.extractor.VorbisUtil;
 import com.google.common.collect.ImmutableList;
+import com.google.common.primitives.ImmutableIntArray;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.List;
@@ -124,6 +126,8 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
    */
   private static final String VIVO_BITS_PER_SAMPLE_KEY = "v-bits-per-sample";
 
+  private static final long READY_GRACE_PERIOD_MS = 100;
+
   private final Context context;
   private final EventDispatcher eventDispatcher;
   private final AudioSink audioSink;
@@ -141,9 +145,12 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   private boolean allowPositionDiscontinuity;
   private boolean audioSinkNeedsReset;
   private boolean hasPendingReportedSkippedSilence;
+  private boolean hasReportedAudioPositionAdvancing;
   private int rendererPriority;
   private boolean isStarted;
   private long nextBufferToWritePresentationTimeUs;
+  private long firstNotReadyTimeMs;
+  private boolean hasBeenReady;
 
   /**
    * @param context A context.
@@ -311,11 +318,12 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
       AudioSink audioSink,
       @Nullable LoudnessCodecController loudnessCodecController) {
     super(
+        context.getApplicationContext(),
         C.TRACK_TYPE_AUDIO,
         codecAdapterFactory,
         mediaCodecSelector,
         enableDecoderFallback,
-        /* assumedMinimumCodecOperatingRate= */ 44100);
+        /* assumedMinimumCodecOperatingRate= */ 0);
     context = context.getApplicationContext();
     this.context = context;
     this.audioSink = audioSink;
@@ -323,7 +331,8 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     rendererPriority = C.PRIORITY_PLAYBACK;
     eventDispatcher = new EventDispatcher(eventHandler, eventListener);
     nextBufferToWritePresentationTimeUs = C.TIME_UNSET;
-    audioSink.setListener(new AudioSinkListener());
+    firstNotReadyTimeMs = C.TIME_UNSET;
+    hasBeenReady = false;
   }
 
   @Override
@@ -372,13 +381,13 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     // Check whether the first decoder supports the format. This is the preferred decoder for the
     // format's MIME type, according to the MediaCodecSelector.
     MediaCodecInfo decoderInfo = decoderInfos.get(0);
-    boolean isFormatSupported = decoderInfo.isFormatSupported(format);
+    boolean isFormatSupported = decoderInfo.isFormatSupported(context, format);
     boolean isPreferredDecoder = true;
     if (!isFormatSupported) {
       // Check whether any of the other decoders support the format.
       for (int i = 1; i < decoderInfos.size(); i++) {
         MediaCodecInfo otherDecoderInfo = decoderInfos.get(i);
-        if (otherDecoderInfo.isFormatSupported(format)) {
+        if (otherDecoderInfo.isFormatSupported(context, format)) {
           decoderInfo = otherDecoderInfo;
           isFormatSupported = true;
           isPreferredDecoder = false;
@@ -430,7 +439,9 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
       MediaCodecSelector mediaCodecSelector, Format format, boolean requiresSecureDecoder)
       throws DecoderQueryException {
     return MediaCodecUtil.getDecoderInfosSortedByFormatSupport(
-        getDecoderInfos(mediaCodecSelector, format, requiresSecureDecoder, audioSink), format);
+        context,
+        getDecoderInfos(mediaCodecSelector, format, requiresSecureDecoder, audioSink),
+        format);
   }
 
   /**
@@ -507,7 +518,10 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
 
   @Override
   protected DecoderReuseEvaluation canReuseCodec(
-      MediaCodecInfo codecInfo, Format oldFormat, Format newFormat) {
+      MediaCodecInfo codecInfo,
+      Format oldFormat,
+      Format newFormat,
+      boolean isAdaptiveFormatChange) {
     DecoderReuseEvaluation evaluation = codecInfo.canReuseCodec(oldFormat, newFormat);
 
     @DecoderDiscardReasons int discardReasons = evaluation.discardReasons;
@@ -547,9 +561,11 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
           : DEFAULT_DURATION_TO_PROGRESS_US;
     }
     long audioTrackBufferDurationUs = audioSink.getAudioTrackBufferSizeUs();
-    if (!audioSinkBufferFull || audioTrackBufferDurationUs == C.TIME_UNSET) {
-      // If the AudioSink buffer is not yet full or getting the audio track buffer size is
-      // unsupported, continue calling with default duration to progress.
+    if (!hasReportedAudioPositionAdvancing
+        || !audioSinkBufferFull
+        || audioTrackBufferDurationUs == C.TIME_UNSET) {
+      // If audio has not yet advanced, the AudioSink buffer is not yet full, or getting the audio
+      // track buffer size is unsupported, continue calling with default duration to progress.
       return DEFAULT_DURATION_TO_PROGRESS_US;
     }
     // Compare written, yet-to-play content duration against the audio track buffer size.
@@ -560,8 +576,6 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
             (bufferedDurationUs
                 / (getPlaybackParameters() != null ? getPlaybackParameters().speed : 1.0f)
                 / 2);
-    // Account for the elapsed time since the start of this iteration of the rendering loop.
-    bufferedDurationUs -= Util.msToUs(getClock().elapsedRealtime()) - elapsedRealtimeUs;
     return max(DEFAULT_DURATION_TO_PROGRESS_US, bufferedDurationUs);
   }
 
@@ -577,7 +591,17 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
         maxSampleRate = max(maxSampleRate, streamSampleRate);
       }
     }
-    return maxSampleRate == -1 ? CODEC_OPERATING_RATE_UNSET : (maxSampleRate * targetPlaybackSpeed);
+
+    int sampleRate = maxSampleRate;
+    if (sampleRate == -1) {
+      MediaFormat codecOutputMediaFormat = getCodecOutputMediaFormat();
+      if (codecOutputMediaFormat != null
+          && codecOutputMediaFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+        sampleRate = codecOutputMediaFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+      }
+    }
+
+    return sampleRate == -1 ? CODEC_OPERATING_RATE_UNSET : (sampleRate * targetPlaybackSpeed);
   }
 
   @Override
@@ -615,7 +639,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   protected void onOutputFormatChanged(Format format, @Nullable MediaFormat mediaFormat)
       throws ExoPlaybackException {
     Format audioSinkInputFormat;
-    @Nullable int[] channelMap = null;
+    @Nullable ImmutableIntArray channelMap = null;
     if (decryptOnlyCodecFormat != null) { // Direct playback with a codec for decryption.
       audioSinkInputFormat = decryptOnlyCodecFormat;
     } else if (getCodec() == null) { // Direct playback with codec bypass.
@@ -635,6 +659,19 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
         // output 16-bit PCM.
         pcmEncoding = C.ENCODING_PCM_16BIT;
       }
+      int channelCount = mediaFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+      int channelMask = Format.NO_VALUE;
+      if (format.channelMask != Format.NO_VALUE && format.channelCount == channelCount) {
+        channelMask = format.channelMask;
+      }
+
+      if (mediaFormat.containsKey(MediaFormat.KEY_CHANNEL_MASK)) {
+        int mediaFormatChannelMask = mediaFormat.getInteger(MediaFormat.KEY_CHANNEL_MASK);
+        if (mediaFormatChannelMask != AudioFormat.CHANNEL_INVALID
+            && Integer.bitCount(mediaFormatChannelMask) == channelCount) {
+          channelMask = mediaFormatChannelMask;
+        }
+      }
       audioSinkInputFormat =
           new Format.Builder()
               .setSampleMimeType(MimeTypes.AUDIO_RAW)
@@ -649,16 +686,19 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
               .setLanguage(format.language)
               .setSelectionFlags(format.selectionFlags)
               .setRoleFlags(format.roleFlags)
-              .setChannelCount(mediaFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+              .setChannelCount(channelCount)
+              .setChannelMask(channelMask)
               .setSampleRate(mediaFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE))
               .build();
       if (codecNeedsDiscardChannelsWorkaround
           && audioSinkInputFormat.channelCount == 6
           && format.channelCount < 6) {
-        channelMap = new int[format.channelCount];
+        ImmutableIntArray.Builder channelMapBuilder =
+            ImmutableIntArray.builder(format.channelCount);
         for (int i = 0; i < format.channelCount; i++) {
-          channelMap[i] = i;
+          channelMapBuilder.add(i);
         }
+        channelMap = channelMapBuilder.build();
       } else if (codecNeedsVorbisToAndroidChannelMappingWorkaround) {
         channelMap =
             VorbisUtil.getVorbisToAndroidChannelLayoutMapping(audioSinkInputFormat.channelCount);
@@ -675,11 +715,17 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
           audioSink.setOffloadMode(AudioSink.OFFLOAD_MODE_DISABLED);
         }
       }
-      audioSink.configure(audioSinkInputFormat, /* specifiedBufferSize= */ 0, channelMap);
+      audioSink.configure(
+          new AudioSink.AudioSinkConfig.Builder(audioSinkInputFormat)
+              .setOutputChannelMapping(channelMap)
+              .setTimeline(getTimeline())
+              .setMediaPeriodId(getMediaPeriodId())
+              .build());
     } catch (AudioSink.ConfigurationException e) {
       throw createRendererException(
           e, e.format, PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED);
     }
+    updateCodecOperatingRate();
   }
 
   /** See {@link AudioSink.Listener#onPositionDiscontinuity()}. */
@@ -701,6 +747,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     }
     audioSink.setPlayerId(getPlayerId());
     audioSink.setClock(getClock());
+    audioSink.setListener(new AudioSinkListener());
   }
 
   @Override
@@ -712,7 +759,10 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
 
     currentPositionUs = positionUs;
     nextBufferToWritePresentationTimeUs = C.TIME_UNSET;
+    firstNotReadyTimeMs = C.TIME_UNSET;
+    hasBeenReady = false;
     hasPendingReportedSkippedSilence = false;
+    hasReportedAudioPositionAdvancing = false;
     allowPositionDiscontinuity = true;
   }
 
@@ -729,6 +779,9 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     isStarted = false;
     audioSink.pause();
     super.onStopped();
+    hasReportedAudioPositionAdvancing = false;
+    firstNotReadyTimeMs = C.TIME_UNSET;
+    hasBeenReady = false;
   }
 
   @Override
@@ -736,6 +789,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     audioSinkNeedsReset = true;
     inputFormat = null;
     nextBufferToWritePresentationTimeUs = C.TIME_UNSET;
+    hasReportedAudioPositionAdvancing = false;
     try {
       audioSink.flush();
     } finally {
@@ -750,6 +804,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   @Override
   protected void onReset() {
     hasPendingReportedSkippedSilence = false;
+    hasReportedAudioPositionAdvancing = false;
     nextBufferToWritePresentationTimeUs = C.TIME_UNSET;
     try {
       super.onReset();
@@ -776,7 +831,25 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
 
   @Override
   public boolean isReady() {
-    return audioSink.hasPendingData();
+    boolean isReady = audioSink.hasPendingData();
+    if (isReady) {
+      firstNotReadyTimeMs = C.TIME_UNSET;
+      hasBeenReady = true;
+      return true;
+    }
+    if (hasBeenReady && isStarted && isSourceReady() && !hasReadStreamToEnd()) {
+      // Engage a grace period for downstream underruns, but exclude genuine upstream starvation
+      // (isSourceReady() is false) and natural stream transitions (hasReadStreamToEnd() is true).
+      long elapsedRealtimeMs = getClock().elapsedRealtime();
+      if (firstNotReadyTimeMs == C.TIME_UNSET) {
+        firstNotReadyTimeMs = elapsedRealtimeMs;
+        return true;
+      }
+      if (elapsedRealtimeMs - firstNotReadyTimeMs < READY_GRACE_PERIOD_MS) {
+        return true;
+      }
+    }
+    return false;
   }
 
   @Override
@@ -1082,6 +1155,26 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     if (SDK_INT >= 35) {
       mediaFormat.setInteger(MediaFormat.KEY_IMPORTANCE, max(0, -rendererPriority));
     }
+
+    if (Objects.equals(format.sampleMimeType, MimeTypes.AUDIO_IAMF)) {
+      // IAMF can support many different output Layouts, which are communicated to the Media Codec
+      // (IAMF Codec2 software decoder) as a channel mask.  We want to choose one appropriate
+      // for the current audio output configuration.
+      AudioCapabilities audioCapabilities = audioSink.getAudioCapabilities();
+      if (audioCapabilities == null) {
+        Log.w(
+            TAG,
+            "AudioCapabilities from the AudioSink are null, using default stereo output layout.");
+        mediaFormat.setInteger(MediaFormat.KEY_CHANNEL_MASK, AudioFormat.CHANNEL_OUT_STEREO);
+        mediaFormat.setInteger(MediaFormat.KEY_MAX_OUTPUT_CHANNEL_COUNT, 2);
+      } else {
+        int channelMask = IamfUtil.getOutputChannelMaskForCurrentConfiguration(audioCapabilities);
+        int channelCount = Integer.bitCount(channelMask);
+        mediaFormat.setInteger(MediaFormat.KEY_CHANNEL_MASK, channelMask);
+        mediaFormat.setInteger(MediaFormat.KEY_MAX_OUTPUT_CHANNEL_COUNT, channelCount);
+      }
+    }
+
     applyCodecParametersToMediaFormat(mediaFormat);
     return mediaFormat;
   }
@@ -1124,7 +1217,9 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
    * <p>See <a href="https://github.com/google/ExoPlayer/issues/5821">GitHub issue #5821</a>.
    */
   private static boolean deviceDoesntSupportOperatingRate() {
-    return SDK_INT == 23 && ("ZTE B2017G".equals(Build.MODEL) || "AXON 7 mini".equals(Build.MODEL));
+    return MediaLibraryInfo.enableWorkarounds()
+        && SDK_INT == 23
+        && ("ZTE B2017G".equals(Build.MODEL) || "AXON 7 mini".equals(Build.MODEL));
   }
 
   /**
@@ -1134,6 +1229,9 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
    * <p>See [Internal: b/35655036].
    */
   private static boolean codecNeedsDiscardChannelsWorkaround(String codecName) {
+    if (!MediaLibraryInfo.enableWorkarounds()) {
+      return false;
+    }
     // The workaround applies to Samsung Galaxy S6 and Samsung Galaxy S7.
     return SDK_INT < 24
         && "OMX.SEC.aac.dec".equals(codecName)
@@ -1170,6 +1268,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
 
     @Override
     public void onPositionAdvancing(long playoutStartSystemTimeMs) {
+      hasReportedAudioPositionAdvancing = true;
       eventDispatcher.positionAdvancing(playoutStartSystemTimeMs);
     }
 

@@ -17,7 +17,7 @@ package androidx.media3.exoplayer.audio;
 
 import static android.media.AudioFormat.CHANNEL_OUT_STEREO;
 import static androidx.media3.exoplayer.audio.AudioOutputProvider.FORMAT_SUPPORTED_DIRECTLY;
-import static androidx.media3.exoplayer.audio.AudioOutputProvider.FORMAT_SUPPORTED_WITH_TRANSCODING;
+import static androidx.media3.exoplayer.audio.AudioOutputProvider.FORMAT_UNSUPPORTED;
 import static androidx.media3.test.utils.robolectric.RobolectricUtil.runMainLooperUntil;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
@@ -42,10 +42,13 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.robolectric.annotation.Config;
 import org.robolectric.shadows.AudioDeviceInfoBuilder;
 import org.robolectric.shadows.ShadowAudioTrack;
+import org.robolectric.shadows.ShadowSystemProperties;
 
 /** Unit tests for {@link AudioTrackAudioOutputProvider}. */
 @RunWith(AndroidJUnit4.class)
@@ -86,7 +89,7 @@ public class AudioTrackAudioOutputProviderTest {
   }
 
   @Test
-  public void getFormatSupport_pcm8Bit_isSupportedWithTranscoding() {
+  public void getFormatSupport_pcm8BitWithHighResolutionPcmOutputDisabled_isUnsupported() {
     Format format =
         new Format.Builder()
             .setSampleMimeType(MimeTypes.AUDIO_RAW)
@@ -95,14 +98,194 @@ public class AudioTrackAudioOutputProviderTest {
             .setPcmEncoding(C.ENCODING_PCM_8BIT)
             .build();
     FormatConfig config =
-        new FormatConfig.Builder(format).setAudioAttributes(TEST_ATTRIBUTES).build();
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableHighResolutionPcmOutput(false)
+            .build();
 
     assertThat(audioOutputProvider.getFormatSupport(config).supportLevel)
-        .isEqualTo(FORMAT_SUPPORTED_WITH_TRANSCODING);
+        .isEqualTo(FORMAT_UNSUPPORTED);
   }
 
   @Test
-  public void getFormatSupport_floatPcmWithFloatOutputDisabled_isSupportedWithTranscoding() {
+  public void getFormatSupport_pcm8BitWithHighResolutionPcmOutputEnabled_isSupportedDirectly() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setChannelCount(2)
+            .setSampleRate(44100)
+            .setPcmEncoding(C.ENCODING_PCM_8BIT)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableHighResolutionPcmOutput(true)
+            .build();
+
+    assertThat(audioOutputProvider.getFormatSupport(config).supportLevel)
+        .isEqualTo(FORMAT_SUPPORTED_DIRECTLY);
+  }
+
+  @Test
+  public void getFormatSupport_pcm24BitWithHighResolutionPcmOutputDisabled_isUnsupported() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setChannelCount(2)
+            .setSampleRate(44100)
+            .setPcmEncoding(C.ENCODING_PCM_24BIT)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableHighResolutionPcmOutput(false)
+            .build();
+
+    assertThat(audioOutputProvider.getFormatSupport(config).supportLevel)
+        .isEqualTo(FORMAT_UNSUPPORTED);
+  }
+
+  @Config(minSdk = 31)
+  @Test
+  public void getFormatSupport_pcm24BitWithHighResolutionPcmOutputEnabled_isSupportedDirectly() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setChannelCount(2)
+            .setSampleRate(44100)
+            .setPcmEncoding(C.ENCODING_PCM_24BIT)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableHighResolutionPcmOutput(true)
+            .build();
+
+    assertThat(audioOutputProvider.getFormatSupport(config).supportLevel)
+        .isEqualTo(FORMAT_SUPPORTED_DIRECTLY);
+  }
+
+  @Config(maxSdk = 30)
+  @Test
+  public void
+      getFormatSupport_pcm24BitWithHighResolutionPcmOutputEnabledBeforeIntroduced_isUnsupported() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setChannelCount(2)
+            .setSampleRate(44100)
+            .setPcmEncoding(C.ENCODING_PCM_24BIT)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableHighResolutionPcmOutput(true)
+            .build();
+
+    assertThat(audioOutputProvider.getFormatSupport(config).supportLevel)
+        .isEqualTo(FORMAT_UNSUPPORTED);
+  }
+
+  @Test
+  public void getFormatSupport_pcm24BitBigEndianWithHighResolutionPcmOutputEnabled_isUnsupported() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setChannelCount(2)
+            .setSampleRate(44100)
+            .setPcmEncoding(C.ENCODING_PCM_24BIT_BIG_ENDIAN)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableHighResolutionPcmOutput(true)
+            .build();
+
+    assertThat(audioOutputProvider.getFormatSupport(config).supportLevel)
+        .isEqualTo(FORMAT_UNSUPPORTED);
+  }
+
+  @Test
+  public void getFormatSupport_pcm32BitWithHighResolutionPcmOutputDisabled_isUnsupported() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setChannelCount(2)
+            .setSampleRate(44100)
+            .setPcmEncoding(C.ENCODING_PCM_32BIT)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableHighResolutionPcmOutput(false)
+            .build();
+
+    assertThat(audioOutputProvider.getFormatSupport(config).supportLevel)
+        .isEqualTo(FORMAT_UNSUPPORTED);
+  }
+
+  @Config(minSdk = 31)
+  @Test
+  public void getFormatSupport_pcm32BitWithHighResolutionPcmOutputEnabled_isSupportedDirectly() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setChannelCount(2)
+            .setSampleRate(44100)
+            .setPcmEncoding(C.ENCODING_PCM_32BIT)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableHighResolutionPcmOutput(true)
+            .build();
+
+    assertThat(audioOutputProvider.getFormatSupport(config).supportLevel)
+        .isEqualTo(FORMAT_SUPPORTED_DIRECTLY);
+  }
+
+  @Config(maxSdk = 30)
+  @Test
+  public void
+      getFormatSupport_pcm32BitWithHighResolutionPcmOutputEnabledBeforeIntroduced_isUnsupported() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setChannelCount(2)
+            .setSampleRate(44100)
+            .setPcmEncoding(C.ENCODING_PCM_32BIT)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableHighResolutionPcmOutput(true)
+            .build();
+
+    assertThat(audioOutputProvider.getFormatSupport(config).supportLevel)
+        .isEqualTo(FORMAT_UNSUPPORTED);
+  }
+
+  @Test
+  public void getFormatSupport_pcm32BitBigEndianWithHighResolutionPcmOutputEnabled_isUnsupported() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setChannelCount(2)
+            .setSampleRate(44100)
+            .setPcmEncoding(C.ENCODING_PCM_32BIT_BIG_ENDIAN)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableHighResolutionPcmOutput(true)
+            .build();
+
+    assertThat(audioOutputProvider.getFormatSupport(config).supportLevel)
+        .isEqualTo(FORMAT_UNSUPPORTED);
+  }
+
+  @Test
+  public void getFormatSupport_floatPcmWithHighResolutionPcmOutputDisabled_isUnsupported() {
     Format format =
         new Format.Builder()
             .setSampleMimeType(MimeTypes.AUDIO_RAW)
@@ -117,11 +300,11 @@ public class AudioTrackAudioOutputProviderTest {
             .build();
 
     assertThat(audioOutputProvider.getFormatSupport(config).supportLevel)
-        .isEqualTo(FORMAT_SUPPORTED_WITH_TRANSCODING);
+        .isEqualTo(FORMAT_UNSUPPORTED);
   }
 
   @Test
-  public void getFormatSupport_floatPcmWithFloatOutputEnabled_isSupportedDirectly() {
+  public void getFormatSupport_floatPcmWithHighResolutionPcmOutputEnabled_isSupportedDirectly() {
     Format format =
         new Format.Builder()
             .setSampleMimeType(MimeTypes.AUDIO_RAW)
@@ -249,6 +432,117 @@ public class AudioTrackAudioOutputProviderTest {
       audioDeviceInfos.add(AudioDeviceInfoBuilder.newBuilder().setType(type).build());
     }
     shadowOf(audioManager).setOutputDevices(audioDeviceInfos.build());
+  }
+
+  @Test
+  @Config(minSdk = 29)
+  public void getOutputConfig_heAacOffloadAndExplicitAacDisabled_forcesImplicitSignaling()
+      throws Exception {
+    ShadowSystemProperties.override("persist.audio.compressed_offload_implicit_aac", "true");
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_AAC)
+            .setSampleRate(48000)
+            .setChannelCount(2)
+            .setCodecs("mp4a.40.5")
+            .build();
+    DefaultAudioSink.AudioOffloadSupportProvider offloadSupportProvider =
+        (f, attributes) ->
+            new AudioOffloadSupport.Builder()
+                .setIsFormatSupported(true)
+                .setIsGaplessSupported(false)
+                .setIsSpeedChangeSupported(false)
+                .build();
+    audioOutputProvider =
+        new AudioTrackAudioOutputProvider.Builder(context)
+            .setAudioOffloadSupportProvider(offloadSupportProvider)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableOffload(true)
+            .build();
+
+    OutputConfig outputConfig = audioOutputProvider.getOutputConfig(config);
+
+    assertThat(outputConfig.isOffload).isTrue();
+    assertThat(outputConfig.encoding).isEqualTo(C.ENCODING_AAC_LC);
+    assertThat(outputConfig.sampleRate).isEqualTo(24000);
+    assertThat(outputConfig.channelMask).isEqualTo(CHANNEL_OUT_STEREO);
+  }
+
+  @Test
+  @Config(minSdk = 29)
+  public void getOutputConfig_heAacV2OffloadAndExplicitAacDisabled_forcesImplicitSignalingAndMono()
+      throws Exception {
+    ShadowSystemProperties.override("persist.audio.compressed_offload_implicit_aac", "true");
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_AAC)
+            .setSampleRate(48000)
+            .setChannelCount(2)
+            .setCodecs("mp4a.40.29")
+            .build();
+    DefaultAudioSink.AudioOffloadSupportProvider offloadSupportProvider =
+        (f, attributes) ->
+            new AudioOffloadSupport.Builder()
+                .setIsFormatSupported(true)
+                .setIsGaplessSupported(false)
+                .setIsSpeedChangeSupported(false)
+                .build();
+    audioOutputProvider =
+        new AudioTrackAudioOutputProvider.Builder(context)
+            .setAudioOffloadSupportProvider(offloadSupportProvider)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableOffload(true)
+            .build();
+
+    OutputConfig outputConfig = audioOutputProvider.getOutputConfig(config);
+
+    assertThat(outputConfig.isOffload).isTrue();
+    assertThat(outputConfig.encoding).isEqualTo(C.ENCODING_AAC_LC);
+    assertThat(outputConfig.sampleRate).isEqualTo(24000);
+    assertThat(outputConfig.channelMask).isEqualTo(AudioFormat.CHANNEL_OUT_MONO);
+  }
+
+  @Ignore("TODO: b/519514605 - Enable when SDK 38 is supported by Robolectric")
+  @Test
+  @Config(minSdk = 38)
+  public void getOutputConfig_heAacOffloadAndExplicitAacEnabled_usesExplicitSignaling()
+      throws Exception {
+    ShadowSystemProperties.override("persist.audio.compressed_offload_implicit_aac", "false");
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_AAC)
+            .setSampleRate(48000)
+            .setChannelCount(2)
+            .setCodecs("mp4a.40.5")
+            .build();
+    DefaultAudioSink.AudioOffloadSupportProvider offloadSupportProvider =
+        (f, attributes) ->
+            new AudioOffloadSupport.Builder()
+                .setIsFormatSupported(true)
+                .setIsGaplessSupported(false)
+                .setIsSpeedChangeSupported(false)
+                .build();
+    audioOutputProvider =
+        new AudioTrackAudioOutputProvider.Builder(context)
+            .setAudioOffloadSupportProvider(offloadSupportProvider)
+            .build();
+    FormatConfig config =
+        new FormatConfig.Builder(format)
+            .setAudioAttributes(TEST_ATTRIBUTES)
+            .setEnableOffload(true)
+            .build();
+
+    OutputConfig outputConfig = audioOutputProvider.getOutputConfig(config);
+
+    assertThat(outputConfig.isOffload).isTrue();
+    assertThat(outputConfig.encoding).isEqualTo(C.ENCODING_AAC_HE_V1);
+    assertThat(outputConfig.sampleRate).isEqualTo(48000);
   }
 
   private static final class AudioCapabilitiesListener implements AudioOutputProvider.Listener {

@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.longThat;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -39,6 +40,7 @@ import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.util.Clock;
 import androidx.media3.decoder.CryptoConfig;
+import androidx.media3.decoder.Decoder;
 import androidx.media3.decoder.DecoderException;
 import androidx.media3.decoder.DecoderInputBuffer;
 import androidx.media3.decoder.SimpleDecoder;
@@ -55,13 +57,17 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableList;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.annotation.Config;
 
 /** Unit test for {@link DecoderAudioRenderer}. */
@@ -71,12 +77,21 @@ public class DecoderAudioRendererTest {
   private static final Format FORMAT =
       new Format.Builder().setSampleMimeType(MimeTypes.AUDIO_RAW).build();
 
+  private final AtomicReference<AudioSink.Listener> audioSinkListener = new AtomicReference<>();
+
+  @Rule public final MockitoRule mockito = MockitoJUnit.rule();
   @Mock private AudioSink mockAudioSink;
   private DecoderAudioRenderer<FakeDecoder> audioRenderer;
 
   @Before
   public void setUp() throws Exception {
-    MockitoAnnotations.initMocks(this);
+    doAnswer(
+            invocation -> {
+              audioSinkListener.set(invocation.getArgument(0, AudioSink.Listener.class));
+              return null;
+            })
+        .when(mockAudioSink)
+        .setListener(any(AudioSink.Listener.class));
     audioRenderer = createAudioRenderer(mockAudioSink);
     audioRenderer.init(/* index= */ 0, PlayerId.UNSET, Clock.DEFAULT);
   }
@@ -263,6 +278,13 @@ public class DecoderAudioRendererTest {
         /* startPositionUs= */ 0,
         /* offsetUs= */ 0,
         new MediaSource.MediaPeriodId(new Object()));
+    when(mockAudioSink.handleBuffer(
+            any(), longThat(presentationTimeUs -> presentationTimeUs == 50_000), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              audioSinkListener.get().onPositionAdvancing(0);
+              return true;
+            });
     // Represents audio sink buffers being full when trying to write 150000 us sample.
     when(mockAudioSink.handleBuffer(
             any(), longThat(presentationTimeUs -> presentationTimeUs == 150000), anyInt()))
@@ -311,6 +333,13 @@ public class DecoderAudioRendererTest {
                 oneByteSample(/* timeUs= */ 200000, C.BUFFER_FLAG_KEY_FRAME),
                 oneByteSample(/* timeUs= */ 250000, C.BUFFER_FLAG_KEY_FRAME),
                 END_OF_STREAM_ITEM));
+    when(mockAudioSink.handleBuffer(
+            any(), longThat(presentationTimeUs -> presentationTimeUs == 50_000), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              audioSinkListener.get().onPositionAdvancing(0);
+              return true;
+            });
     // Represents audio sink buffers being full when trying to write 150000 us sample.
     when(mockAudioSink.handleBuffer(
             any(), longThat(presentationTimeUs -> presentationTimeUs == 150000), anyInt()))
@@ -340,20 +369,17 @@ public class DecoderAudioRendererTest {
   }
 
   @Test
-  public void
-      getDurationToProgressUs_usingAudioTrackBufferDurationUsAndPlaybackAdvancement_returnsCalculatedDuration()
-          throws Exception {
-    when(mockAudioSink.isEnded()).thenReturn(true);
+  public void getDurationToProgressUs_beforeAudioPositionAdvances_returnsDefaultDuration()
+      throws Exception {
     when(mockAudioSink.handleBuffer(any(), anyLong(), anyInt())).thenReturn(true);
     when(mockAudioSink.getPlaybackParameters()).thenReturn(PlaybackParameters.DEFAULT);
     when(mockAudioSink.getAudioTrackBufferSizeUs()).thenReturn(100_000L);
     when(mockAudioSink.hasPendingData()).thenReturn(true);
-    FakeClock fakeClock = new FakeClock(/* initialTimeMs= */ 100, /* isAutoAdvancing= */ true);
     CountDownLatch latchDecode = new CountDownLatch(4);
     ForwardingAudioSinkWithCountdownLatch countdownLatchAudioSink =
         new ForwardingAudioSinkWithCountdownLatch(mockAudioSink, latchDecode);
     audioRenderer = createAudioRenderer(countdownLatchAudioSink);
-    audioRenderer.init(/* index= */ 0, PlayerId.UNSET, fakeClock);
+    audioRenderer.init(/* index= */ 0, PlayerId.UNSET, Clock.DEFAULT);
     FakeSampleStream fakeSampleStream =
         new FakeSampleStream(
             new DefaultAllocator(/* trimOnReset= */ true, /* individualAllocationSize= */ 1024),
@@ -363,16 +389,12 @@ public class DecoderAudioRendererTest {
             /* initialFormat= */ FORMAT,
             ImmutableList.of(
                 oneByteSample(/* timeUs= */ 0, C.BUFFER_FLAG_KEY_FRAME),
-                oneByteSample(/* timeUs= */ 50000, C.BUFFER_FLAG_KEY_FRAME),
-                oneByteSample(/* timeUs= */ 100000, C.BUFFER_FLAG_KEY_FRAME),
-                oneByteSample(/* timeUs= */ 150000, C.BUFFER_FLAG_KEY_FRAME),
-                oneByteSample(/* timeUs= */ 200000, C.BUFFER_FLAG_KEY_FRAME),
-                oneByteSample(/* timeUs= */ 250000, C.BUFFER_FLAG_KEY_FRAME),
+                oneByteSample(/* timeUs= */ 50_000, C.BUFFER_FLAG_KEY_FRAME),
+                oneByteSample(/* timeUs= */ 100_000, C.BUFFER_FLAG_KEY_FRAME),
+                oneByteSample(/* timeUs= */ 150_000, C.BUFFER_FLAG_KEY_FRAME),
+                oneByteSample(/* timeUs= */ 200_000, C.BUFFER_FLAG_KEY_FRAME),
+                oneByteSample(/* timeUs= */ 250_000, C.BUFFER_FLAG_KEY_FRAME),
                 END_OF_STREAM_ITEM));
-    // Represents audio sink buffers being full when trying to write 150000 us sample.
-    when(mockAudioSink.handleBuffer(
-            any(), longThat(presentationTimeUs -> presentationTimeUs == 150000), anyInt()))
-        .thenReturn(false);
     fakeSampleStream.writeData(/* startPositionUs= */ 0);
     audioRenderer.enable(
         RendererConfiguration.DEFAULT,
@@ -384,20 +406,21 @@ public class DecoderAudioRendererTest {
         /* startPositionUs= */ 0,
         /* offsetUs= */ 0,
         new MediaSource.MediaPeriodId(new Object()));
+    // Represents audio sink buffers being full when trying to write 150000 us sample.
+    when(mockAudioSink.handleBuffer(
+            any(), longThat(presentationTimeUs -> presentationTimeUs == 150000), anyInt()))
+        .thenReturn(false);
     audioRenderer.start();
-    long rendererPositionElapsedRealtimeUs = SystemClock.elapsedRealtime() * 1000;
     while (latchDecode.getCount() != 0) {
-      audioRenderer.render(/* positionUs= */ 0, rendererPositionElapsedRealtimeUs);
+      audioRenderer.render(/* positionUs= */ 0, SystemClock.elapsedRealtime() * 1000);
     }
-    audioRenderer.render(/* positionUs= */ 0, rendererPositionElapsedRealtimeUs);
+    audioRenderer.render(/* positionUs= */ 0, SystemClock.elapsedRealtime() * 1000);
 
-    // Simulate playback progressing between render() and getDurationToProgressUs call
-    fakeClock.advanceTime(/* timeDiffMs= */ 10);
     long durationToProgressUs =
         audioRenderer.getDurationToProgressUs(
-            /* positionUs= */ 0, rendererPositionElapsedRealtimeUs);
+            /* positionUs= */ 0, SystemClock.elapsedRealtime() * 1000);
 
-    assertThat(durationToProgressUs).isEqualTo(40_000L);
+    assertThat(durationToProgressUs).isEqualTo(10_000L);
   }
 
   @Test
@@ -439,6 +462,13 @@ public class DecoderAudioRendererTest {
         /* startPositionUs= */ 0,
         /* offsetUs= */ 0,
         new MediaSource.MediaPeriodId(new Object()));
+    when(mockAudioSink.handleBuffer(
+            any(), longThat(presentationTimeUs -> presentationTimeUs == 50_000), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              audioSinkListener.get().onPositionAdvancing(0);
+              return true;
+            });
     // Represents audio sink buffers being full when trying to write 150000 us sample.
     when(mockAudioSink.handleBuffer(
             any(), longThat(presentationTimeUs -> presentationTimeUs == 150000), anyInt()))
@@ -491,6 +521,13 @@ public class DecoderAudioRendererTest {
         /* startPositionUs= */ 0,
         /* offsetUs= */ 0,
         new MediaSource.MediaPeriodId(new Object()));
+    when(mockAudioSink.handleBuffer(
+            any(), longThat(presentationTimeUs -> presentationTimeUs == 50_000), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              audioSinkListener.get().onPositionAdvancing(0);
+              return true;
+            });
     // Represents audio sink buffers being full when trying to write 150_000 us sample.
     when(mockAudioSink.handleBuffer(
             any(), longThat(presentationTimeUs -> presentationTimeUs == 150_000), anyInt()))
@@ -543,6 +580,13 @@ public class DecoderAudioRendererTest {
         /* startPositionUs= */ 0,
         /* offsetUs= */ 0,
         new MediaSource.MediaPeriodId(new Object()));
+    when(mockAudioSink.handleBuffer(
+            any(), longThat(presentationTimeUs -> presentationTimeUs == 50_000), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              audioSinkListener.get().onPositionAdvancing(0);
+              return true;
+            });
     // Represents audio sink buffers being accepted, simulating a sink that isn't full yet.
     when(mockAudioSink.handleBuffer(any(), anyLong(), anyInt())).thenReturn(true);
     when(mockAudioSink.getPlaybackParameters()).thenReturn(PlaybackParameters.DEFAULT);
@@ -594,6 +638,13 @@ public class DecoderAudioRendererTest {
         /* startPositionUs= */ 0,
         /* offsetUs= */ 0,
         new MediaSource.MediaPeriodId(new Object()));
+    when(mockAudioSink.handleBuffer(
+            any(), longThat(presentationTimeUs -> presentationTimeUs == 50_000), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              audioSinkListener.get().onPositionAdvancing(0);
+              return true;
+            });
     // Represents audio sink buffers being accepted, simulating a sink that isn't full yet.
     when(mockAudioSink.handleBuffer(any(), anyLong(), anyInt())).thenReturn(true);
     when(mockAudioSink.getPlaybackParameters()).thenReturn(PlaybackParameters.DEFAULT);
@@ -648,6 +699,13 @@ public class DecoderAudioRendererTest {
         /* offsetUs= */ 0,
         new MediaSource.MediaPeriodId(new Object()));
     audioRenderer.setCurrentStreamFinal();
+    when(mockAudioSink.handleBuffer(
+            any(), longThat(presentationTimeUs -> presentationTimeUs == 50_000), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              audioSinkListener.get().onPositionAdvancing(0);
+              return true;
+            });
     // Represents audio sink buffers being accepted, simulating a sink that isn't full yet.
     when(mockAudioSink.handleBuffer(any(), anyLong(), anyInt())).thenReturn(true);
     when(mockAudioSink.getPlaybackParameters()).thenReturn(PlaybackParameters.DEFAULT);
@@ -711,6 +769,13 @@ public class DecoderAudioRendererTest {
         new MediaSource.MediaPeriodId(new Object()));
     audioRenderer.start();
     audioRenderer.setCurrentStreamFinal();
+    when(mockAudioSink.handleBuffer(
+            any(), longThat(presentationTimeUs -> presentationTimeUs == 50_000), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              audioSinkListener.get().onPositionAdvancing(0);
+              return true;
+            });
     while (!hasCalledPlayToEndOfStream.get()) {
       audioRenderer.render(/* positionUs= */ 0, SystemClock.elapsedRealtime() * 1000);
     }
@@ -758,6 +823,13 @@ public class DecoderAudioRendererTest {
         /* startPositionUs= */ 0,
         /* offsetUs= */ 0,
         new MediaSource.MediaPeriodId(new Object()));
+    when(mockAudioSink.handleBuffer(
+            any(), longThat(presentationTimeUs -> presentationTimeUs == 50_000), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              audioSinkListener.get().onPositionAdvancing(0);
+              return true;
+            });
     // Represents audio sink buffers being full when trying to write 150_000 us sample.
     when(mockAudioSink.handleBuffer(
             any(), longThat(presentationTimeUs -> presentationTimeUs == 150_000), anyInt()))
@@ -813,6 +885,13 @@ public class DecoderAudioRendererTest {
         /* startPositionUs= */ 0,
         /* offsetUs= */ 0,
         new MediaSource.MediaPeriodId(new Object()));
+    when(mockAudioSink.handleBuffer(
+            any(), longThat(presentationTimeUs -> presentationTimeUs == 50_000), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              audioSinkListener.get().onPositionAdvancing(0);
+              return true;
+            });
     // Represents audio sink buffers being full when trying to write 150_000 us sample.
     when(mockAudioSink.handleBuffer(
             any(), longThat(presentationTimeUs -> presentationTimeUs == 150_000), anyInt()))
@@ -831,6 +910,103 @@ public class DecoderAudioRendererTest {
             /* positionUs= */ 0, SystemClock.elapsedRealtime() * 1000);
 
     assertThat(durationToProgressUs).isEqualTo(10_000L);
+  }
+
+  @Test
+  public void maybeInitDecoder_setsCallbackOnDecoder() throws Exception {
+    AtomicReference<Decoder.Callback> callbackReference = new AtomicReference<>();
+    AtomicReference<Executor> executorReference = new AtomicReference<>();
+
+    DecoderAudioRenderer<Decoder<DecoderInputBuffer, SimpleDecoderOutputBuffer, DecoderException>>
+        testRenderer =
+            new DecoderAudioRenderer<
+                Decoder<DecoderInputBuffer, SimpleDecoderOutputBuffer, DecoderException>>(
+                null, null, mockAudioSink) {
+              @Override
+              public String getName() {
+                return "TestAudioRenderer";
+              }
+
+              @Override
+              protected @C.FormatSupport int supportsFormatInternal(Format format) {
+                return FORMAT_HANDLED;
+              }
+
+              @Override
+              protected Decoder<DecoderInputBuffer, SimpleDecoderOutputBuffer, DecoderException>
+                  createDecoder(Format format, @Nullable CryptoConfig cryptoConfig) {
+                return new Decoder<
+                    DecoderInputBuffer, SimpleDecoderOutputBuffer, DecoderException>() {
+                  @Override
+                  public void setCallback(Decoder.Callback callback, Executor executor) {
+                    callbackReference.set(callback);
+                    executorReference.set(executor);
+                  }
+
+                  @Override
+                  public String getName() {
+                    return "TestDecoder";
+                  }
+
+                  @Override
+                  public void setOutputStartTimeUs(long outputStartTimeUs) {}
+
+                  @Override
+                  public DecoderInputBuffer dequeueInputBuffer() throws DecoderException {
+                    return null;
+                  }
+
+                  @Override
+                  public void queueInputBuffer(DecoderInputBuffer inputBuffer)
+                      throws DecoderException {}
+
+                  @Override
+                  public SimpleDecoderOutputBuffer dequeueOutputBuffer() throws DecoderException {
+                    return null;
+                  }
+
+                  @Override
+                  public void flush() {}
+
+                  @Override
+                  public void release() {}
+                };
+              }
+
+              @Override
+              protected Format getOutputFormat(
+                  Decoder<DecoderInputBuffer, SimpleDecoderOutputBuffer, DecoderException>
+                      decoder) {
+                return FORMAT;
+              }
+            };
+    testRenderer.init(/* index= */ 0, PlayerId.UNSET, Clock.DEFAULT);
+
+    FakeSampleStream fakeSampleStream =
+        new FakeSampleStream(
+            new DefaultAllocator(/* trimOnReset= */ true, /* individualAllocationSize= */ 1024),
+            /* mediaSourceEventDispatcher= */ null,
+            DrmSessionManager.DRM_UNSUPPORTED,
+            new DrmSessionEventListener.EventDispatcher(),
+            FORMAT,
+            ImmutableList.of(oneByteSample(/* timeUs= */ 0, C.BUFFER_FLAG_KEY_FRAME)));
+    fakeSampleStream.writeData(/* startPositionUs= */ 0);
+
+    testRenderer.enable(
+        RendererConfiguration.DEFAULT,
+        new Format[] {FORMAT},
+        fakeSampleStream,
+        /* positionUs= */ 0,
+        /* joining= */ false,
+        /* mayRenderStartOfStream= */ true,
+        /* startPositionUs= */ 0,
+        /* offsetUs= */ 0,
+        new MediaSource.MediaPeriodId(new Object()));
+
+    testRenderer.render(0, 0);
+
+    assertThat(callbackReference.get()).isNotNull();
+    assertThat(executorReference.get()).isNotNull();
   }
 
   private static DecoderAudioRenderer<FakeDecoder> createAudioRenderer(AudioSink audioSink) {
@@ -855,6 +1031,128 @@ public class DecoderAudioRendererTest {
         return FORMAT;
       }
     };
+  }
+
+  @Test
+  public void isReady_withoutPreviousReadyState_returnsFalse() throws Exception {
+    FakeClock fakeClock = new FakeClock(/* initialTimeMs= */ 100, /* isAutoAdvancing= */ false);
+    setupRendererWithFakeClock(fakeClock);
+    enableAndStartRenderer();
+
+    when(mockAudioSink.hasPendingData()).thenReturn(false);
+
+    assertThat(audioRenderer.isReady()).isFalse();
+  }
+
+  @Test
+  public void isReady_duringTransientUnderrun_returnsTrueForGracePeriodDuration() throws Exception {
+    FakeClock fakeClock = new FakeClock(/* initialTimeMs= */ 100, /* isAutoAdvancing= */ false);
+    setupRendererWithFakeClock(fakeClock);
+    enableAndStartRenderer();
+
+    // 1. Transition to ready state
+    when(mockAudioSink.hasPendingData()).thenReturn(true);
+    assertThat(audioRenderer.isReady()).isTrue();
+
+    // 2. Transition to dry (underrun) state
+    when(mockAudioSink.hasPendingData()).thenReturn(false);
+
+    // First call to isReady in underrun triggers the grace period
+    assertThat(audioRenderer.isReady()).isTrue();
+
+    // Advance clock, still within grace period (< 100ms)
+    fakeClock.advanceTime(99);
+    assertThat(audioRenderer.isReady()).isTrue();
+  }
+
+  @Test
+  public void isReady_persistentUnderrun_returnsFalseAfterGracePeriodDuration() throws Exception {
+    FakeClock fakeClock = new FakeClock(/* initialTimeMs= */ 100, /* isAutoAdvancing= */ false);
+    setupRendererWithFakeClock(fakeClock);
+    enableAndStartRenderer();
+
+    // 1. Transition to ready state
+    when(mockAudioSink.hasPendingData()).thenReturn(true);
+    assertThat(audioRenderer.isReady()).isTrue();
+
+    // 2. Transition to dry (underrun) state
+    when(mockAudioSink.hasPendingData()).thenReturn(false);
+
+    // First call triggers grace period
+    assertThat(audioRenderer.isReady()).isTrue();
+
+    // Advance clock past the grace period (>= 100ms)
+    fakeClock.advanceTime(100);
+    assertThat(audioRenderer.isReady()).isFalse();
+  }
+
+  @Test
+  public void isReady_onPositionReset_resetsGracePeriodState() throws Exception {
+    FakeClock fakeClock = new FakeClock(/* initialTimeMs= */ 100, /* isAutoAdvancing= */ false);
+    setupRendererWithFakeClock(fakeClock);
+    enableAndStartRenderer();
+
+    // 1. Transition to ready state
+    when(mockAudioSink.hasPendingData()).thenReturn(true);
+    assertThat(audioRenderer.isReady()).isTrue();
+
+    // 2. Perform position reset
+    audioRenderer.resetPosition(/* positionUs= */ 0, /* sampleStreamIsResetToKeyFrame= */ true);
+
+    // 3. Transition to dry state
+    when(mockAudioSink.hasPendingData()).thenReturn(false);
+
+    // Should return false immediately (no grace period) because grace period state was reset
+    assertThat(audioRenderer.isReady()).isFalse();
+  }
+
+  @Test
+  public void isReady_onStopped_resetsGracePeriodState() throws Exception {
+    FakeClock fakeClock = new FakeClock(/* initialTimeMs= */ 100, /* isAutoAdvancing= */ false);
+    setupRendererWithFakeClock(fakeClock);
+    enableAndStartRenderer();
+
+    // 1. Transition to ready state
+    when(mockAudioSink.hasPendingData()).thenReturn(true);
+    assertThat(audioRenderer.isReady()).isTrue();
+
+    // 2. Stop and start renderer
+    audioRenderer.stop();
+    audioRenderer.start();
+
+    // 3. Transition to dry state
+    when(mockAudioSink.hasPendingData()).thenReturn(false);
+
+    // Should return false immediately (no grace period) because grace period state was reset
+    assertThat(audioRenderer.isReady()).isFalse();
+  }
+
+  private void setupRendererWithFakeClock(FakeClock fakeClock) {
+    audioRenderer = createAudioRenderer(mockAudioSink);
+    audioRenderer.init(/* index= */ 0, PlayerId.UNSET, fakeClock);
+  }
+
+  private void enableAndStartRenderer() throws Exception {
+    FakeSampleStream fakeSampleStream =
+        new FakeSampleStream(
+            new DefaultAllocator(/* trimOnReset= */ true, /* individualAllocationSize= */ 1024),
+            /* mediaSourceEventDispatcher= */ null,
+            DrmSessionManager.DRM_UNSUPPORTED,
+            new DrmSessionEventListener.EventDispatcher(),
+            FORMAT,
+            ImmutableList.of(oneByteSample(/* timeUs= */ 0, C.BUFFER_FLAG_KEY_FRAME)));
+    fakeSampleStream.writeData(/* startPositionUs= */ 0);
+    audioRenderer.enable(
+        RendererConfiguration.DEFAULT,
+        new Format[] {FORMAT},
+        fakeSampleStream,
+        /* positionUs= */ 0,
+        /* joining= */ false,
+        /* mayRenderStartOfStream= */ false,
+        /* startPositionUs= */ 0,
+        /* offsetUs= */ 0,
+        new MediaSource.MediaPeriodId(new Object()));
+    audioRenderer.start();
   }
 
   private static final class FakeDecoder

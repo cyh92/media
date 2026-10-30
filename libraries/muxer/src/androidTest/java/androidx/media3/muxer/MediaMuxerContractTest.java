@@ -24,7 +24,7 @@ import static androidx.media3.muxer.MediaMuxerCompat.OUTPUT_FORMAT_MP4;
 import static androidx.media3.test.utils.AssetInfo.AMR_NB_3GP_ASSET;
 import static androidx.media3.test.utils.AssetInfo.AMR_WB_3GP_ASSET;
 import static androidx.media3.test.utils.AssetInfo.H263_3GP_ASSET;
-import static androidx.media3.test.utils.AssetInfo.MP4_ASSET;
+import static androidx.media3.test.utils.AssetInfo.MP4_ADVANCED_ASSET;
 import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_8K24;
 import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_AV1_VIDEO;
 import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_DOLBY_VISION_HDR;
@@ -47,9 +47,9 @@ import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.util.MediaFormatUtil;
 import androidx.media3.container.Mp4LocationData;
-import androidx.media3.exoplayer.MediaExtractorCompat;
 import androidx.media3.extractor.mp4.Mp4Extractor;
 import androidx.media3.extractor.text.DefaultSubtitleParserFactory;
+import androidx.media3.inspector.MediaExtractorCompat;
 import androidx.media3.test.utils.AssetInfo;
 import androidx.media3.test.utils.FakeExtractorOutput;
 import androidx.media3.test.utils.FakeTrackOutput;
@@ -103,7 +103,7 @@ public final class MediaMuxerContractTest {
   @TestParameter private MuxerFactoryEnum muxerFactoryEnum;
 
   private enum TestAssetEnum {
-    H264_AAC_B_FRAMES(MP4_ASSET),
+    H264_AAC_B_FRAMES(MP4_ADVANCED_ASSET),
     AMR_NB(AMR_NB_3GP_ASSET),
     AMR_WB(AMR_WB_3GP_ASSET),
     H263(H263_3GP_ASSET),
@@ -597,7 +597,7 @@ public final class MediaMuxerContractTest {
     do {
       int sampleSize = (int) extractor.getSampleSize();
       ByteBuffer sampleBuffer = ByteBuffer.allocateDirect(sampleSize);
-      extractor.readSampleData(sampleBuffer, /* offset= */ 0);
+      int unused = extractor.readSampleData(sampleBuffer, /* offset= */ 0);
       sampleBuffer.rewind();
       int sampleTrackIndex = extractor.getSampleTrackIndex();
       MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();

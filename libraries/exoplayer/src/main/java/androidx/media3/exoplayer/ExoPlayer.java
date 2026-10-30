@@ -48,6 +48,7 @@ import androidx.media3.common.Timeline;
 import androidx.media3.common.TrackSelectionParameters;
 import androidx.media3.common.Tracks;
 import androidx.media3.common.util.Clock;
+import androidx.media3.common.util.ExperimentalApi;
 import androidx.media3.common.util.StuckPlayerException;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
@@ -219,6 +220,35 @@ public interface ExoPlayer extends Player {
   final class Builder {
 
     /**
+     * The default timeout for calls to {@link #release} and {@link #setForegroundMode}, in
+     * milliseconds.
+     */
+    @UnstableApi public static final long DEFAULT_RELEASE_TIMEOUT_MS = 500;
+
+    /** The default timeout for detaching a surface from the player, in milliseconds. */
+    @UnstableApi public static final long DEFAULT_DETACH_SURFACE_TIMEOUT_MS = 2000;
+
+    /** The default timeout for detecting whether playback is stuck buffering, in milliseconds. */
+    @UnstableApi public static final int DEFAULT_STUCK_BUFFERING_DETECTION_TIMEOUT_MS = 600_000;
+
+    /** The default timeout for detecting whether playback is stuck playing, in milliseconds. */
+    @UnstableApi
+    public static final int DEFAULT_STUCK_PLAYING_DETECTION_TIMEOUT_MS =
+        isRunningOnEmulator() ? 30_000 : 10_000;
+
+    /**
+     * The default timeout for detecting whether playback is stuck playing but not ending, in
+     * milliseconds.
+     */
+    @UnstableApi public static final int DEFAULT_STUCK_PLAYING_NOT_ENDING_TIMEOUT_MS = 60_000;
+
+    /**
+     * The default timeout for detecting whether playback is stuck in a suppressed state, in
+     * milliseconds.
+     */
+    @UnstableApi public static final int DEFAULT_STUCK_SUPPRESSED_DETECTION_TIMEOUT_MS = 600_000;
+
+    /**
      * Static override to allow stuck playing detection. If {@code false}, the provided timeouts
      * default to {@link Integer#MAX_VALUE} instead of {@link
      * #DEFAULT_STUCK_PLAYING_DETECTION_TIMEOUT_MS} and {@link
@@ -226,7 +256,8 @@ public interface ExoPlayer extends Player {
      *
      * <p>This value is experimental and will be removed in a future release.
      */
-    @UnstableApi public static boolean experimentalEnableStuckPlayingDetection = true;
+    @ExperimentalApi // TODO: b/443074686 - Remove once global opt-out no longer needed.
+    public static boolean experimentalEnableStuckPlayingDetection = true;
 
     /* package */ final Context context;
 
@@ -272,6 +303,8 @@ public interface ExoPlayer extends Player {
     /* package */ String playerName;
     /* package */ boolean dynamicSchedulingEnabled;
     /* package */ SuitableOutputChecker suitableOutputChecker;
+    /* package */ boolean enforceAdPlaybackOnTimelineRefresh;
+    /* package */ boolean perStreamMediaProgressionEnabled;
 
     /**
      * Creates a builder.
@@ -328,7 +361,7 @@ public interface ExoPlayer extends Player {
      *   <li>{@code usePlatformDiagnostics}: {@code true}
      *   <li>{@link Clock}: {@link Clock#DEFAULT}
      *   <li>{@code playbackLooper}: {@code null} (create new thread)
-     *   <li>{@code dynamicSchedulingEnabled}: {@code false}
+     *   <li>{@code dynamicSchedulingEnabled}: {@code true}
      * </ul>
      *
      * @param context A {@link Context}.
@@ -502,6 +535,8 @@ public interface ExoPlayer extends Player {
       playerName = "";
       priority = C.PRIORITY_PLAYBACK;
       suitableOutputChecker = new DefaultSuitableOutputChecker();
+      dynamicSchedulingEnabled = true;
+      enforceAdPlaybackOnTimelineRefresh = true;
     }
 
     /**
@@ -515,6 +550,7 @@ public interface ExoPlayer extends Player {
      */
     @CanIgnoreReturnValue
     @UnstableApi
+    @ExperimentalApi // TODO: b/470371146 - Remove this method.
     public Builder experimentalSetForegroundModeTimeoutMs(long timeoutMs) {
       checkState(!buildCalled);
       foregroundModeTimeoutMs = timeoutMs;
@@ -530,15 +566,39 @@ public interface ExoPlayer extends Player {
      * <p>If a custom {@link AudioSink} is used then it must correctly implement {@link
      * AudioSink#getAudioTrackBufferSizeUs()} to enable dynamic scheduling for audio playback.
      *
+     * <p>Enabled by default (value is {@code true}).
+     *
      * <p>This method is experimental, and will be renamed or removed in a future release.
      *
      * @param dynamicSchedulingEnabled Whether to enable dynamic scheduling.
      */
     @CanIgnoreReturnValue
-    @UnstableApi
+    @ExperimentalApi // TODO: b/500985770 - Remove this method.
     public Builder experimentalSetDynamicSchedulingEnabled(boolean dynamicSchedulingEnabled) {
       checkState(!buildCalled);
       this.dynamicSchedulingEnabled = dynamicSchedulingEnabled;
+      return this;
+    }
+
+    /**
+     * Sets whether ExoPlayer can advance its media processing on a per-stream basis.
+     *
+     * <p>The default is {@code false}.
+     *
+     * <p>If {@code false} then ExoPlayer will not start processing the next item in the playlist
+     * until it has finished with the current item. If {@code true} then ExoPlayer may enable
+     * renderers on subsequent playlist items as each finishes processing media. Enabling this
+     * feature can reduce startup latency between media items.
+     *
+     * <p>This method is experimental, and will be renamed or removed in a future release.
+     *
+     * @param perStreamMediaProgressionEnabled Whether to enable media progression per stream.
+     */
+    @CanIgnoreReturnValue
+    @ExperimentalApi // TODO: b/510217604 - Remove this method.
+    public Builder enablePerStreamMediaProgression(boolean perStreamMediaProgressionEnabled) {
+      checkState(!buildCalled);
+      this.perStreamMediaProgressionEnabled = perStreamMediaProgressionEnabled;
       return this;
     }
 
@@ -638,12 +698,14 @@ public interface ExoPlayer extends Player {
      * @param bandwidthMeter A {@link BandwidthMeter}.
      * @return This builder.
      * @throws IllegalStateException If {@link #build()} has already been called.
+     * @throws IllegalArgumentException If {@code bandwidthMeter} is {@link BandwidthMeter#NO_OP}.
      */
     @CanIgnoreReturnValue
     @UnstableApi
     public Builder setBandwidthMeter(BandwidthMeter bandwidthMeter) {
       checkState(!buildCalled);
       checkNotNull(bandwidthMeter);
+      checkArgument(bandwidthMeter != BandwidthMeter.NO_OP);
       this.bandwidthMeterSupplier = () -> bandwidthMeter;
       return this;
     }
@@ -1116,6 +1178,28 @@ public interface ExoPlayer extends Player {
     }
 
     /**
+     * Sets whether to enforce ad playback when the timeline is refreshed by a source update.
+     *
+     * <p>If {@code true}, then an ad group resolved at or before the current playback position
+     * during a timeline refresh will be played. If {@code false}, then the resolved ad group will
+     * not play.
+     *
+     * <p>The default is {@code true}.
+     *
+     * @param enforceAdPlaybackOnTimelineRefresh Whether to enforce ad playback on timeline refresh.
+     * @return This builder.
+     * @throws IllegalStateException If {@link #build()} has already been called.
+     */
+    @CanIgnoreReturnValue
+    @UnstableApi
+    public Builder setEnforceAdPlaybackOnTimelineRefresh(
+        boolean enforceAdPlaybackOnTimelineRefresh) {
+      checkState(!buildCalled);
+      this.enforceAdPlaybackOnTimelineRefresh = enforceAdPlaybackOnTimelineRefresh;
+      return this;
+    }
+
+    /**
      * Sets the {@link LivePlaybackSpeedControl} that will control the playback speed when playing
      * live streams, in order to maintain a steady target offset from the live stream edge.
      *
@@ -1267,32 +1351,36 @@ public interface ExoPlayer extends Player {
   }
 
   /**
-   * The default timeout for calls to {@link #release} and {@link #setForegroundMode}, in
-   * milliseconds.
+   * @deprecated Use {@link Builder#DEFAULT_RELEASE_TIMEOUT_MS} instead.
    */
-  @UnstableApi long DEFAULT_RELEASE_TIMEOUT_MS = 500;
-
-  /** The default timeout for detaching a surface from the player, in milliseconds. */
-  @UnstableApi long DEFAULT_DETACH_SURFACE_TIMEOUT_MS = 2_000;
-
-  /** The default timeout for detecting whether playback is stuck buffering, in milliseconds. */
-  @UnstableApi int DEFAULT_STUCK_BUFFERING_DETECTION_TIMEOUT_MS = 600_000;
-
-  /** The default timeout for detecting whether playback is stuck playing, in milliseconds. */
-  @UnstableApi
-  int DEFAULT_STUCK_PLAYING_DETECTION_TIMEOUT_MS = isRunningOnEmulator() ? 30_000 : 10_000;
+  @Deprecated @UnstableApi long DEFAULT_RELEASE_TIMEOUT_MS = Builder.DEFAULT_RELEASE_TIMEOUT_MS;
 
   /**
-   * The default timeout for detecting whether playback is stuck playing but not ending, in
-   * milliseconds.
+   * @deprecated Use {@link Builder#DEFAULT_DETACH_SURFACE_TIMEOUT_MS} instead.
    */
-  @UnstableApi int DEFAULT_STUCK_PLAYING_NOT_ENDING_TIMEOUT_MS = 60_000;
+  @Deprecated @UnstableApi
+  long DEFAULT_DETACH_SURFACE_TIMEOUT_MS = Builder.DEFAULT_DETACH_SURFACE_TIMEOUT_MS;
 
   /**
-   * The default timeout for detecting whether playback is stuck in a suppressed state, in
-   * milliseconds.
+   * @deprecated Use {@link Builder#DEFAULT_STUCK_BUFFERING_DETECTION_TIMEOUT_MS} instead.
    */
-  @UnstableApi int DEFAULT_STUCK_SUPPRESSED_DETECTION_TIMEOUT_MS = 600_000;
+  @Deprecated @UnstableApi
+  int DEFAULT_STUCK_BUFFERING_DETECTION_TIMEOUT_MS =
+      Builder.DEFAULT_STUCK_BUFFERING_DETECTION_TIMEOUT_MS;
+
+  /**
+   * @deprecated Use {@link Builder#DEFAULT_STUCK_PLAYING_NOT_ENDING_TIMEOUT_MS} instead.
+   */
+  @Deprecated @UnstableApi
+  int DEFAULT_STUCK_PLAYING_NOT_ENDING_TIMEOUT_MS =
+      Builder.DEFAULT_STUCK_PLAYING_NOT_ENDING_TIMEOUT_MS;
+
+  /**
+   * @deprecated Use {@link Builder#DEFAULT_STUCK_SUPPRESSED_DETECTION_TIMEOUT_MS} instead.
+   */
+  @Deprecated @UnstableApi
+  int DEFAULT_STUCK_SUPPRESSED_DETECTION_TIMEOUT_MS =
+      Builder.DEFAULT_STUCK_SUPPRESSED_DETECTION_TIMEOUT_MS;
 
   /**
    * Equivalent to {@link Player#getPlayerError()}, except the exception is guaranteed to be an
@@ -1591,7 +1679,7 @@ public interface ExoPlayer extends Player {
   /**
    * Sets the ID of the audio session to attach to the underlying {@link android.media.AudioTrack}.
    *
-   * <p>The audio session ID can be generated using {@link Util#generateAudioSessionIdV21(Context)}.
+   * <p>The audio session ID can be generated using {@link Util#generateAudioSessionId(Context)}.
    *
    * @param audioSessionId The audio session ID, or {@link C#AUDIO_SESSION_ID_UNSET} if it should be
    *     generated by the framework.
@@ -1886,6 +1974,19 @@ public interface ExoPlayer extends Player {
    */
   @UnstableApi
   void setPauseAtEndOfMediaItems(boolean pauseAtEndOfMediaItems);
+
+  /**
+   * Sets whether to enforce ad playback on timeline refresh.
+   *
+   * <p>If {@code true}, then an ad group resolved at or before the current playback position during
+   * a timeline refresh will be played. If {@code false}, then the resolved ad group will not play.
+   *
+   * <p>The default is {@code true}.
+   *
+   * @param enforceAdPlaybackOnTimelineRefresh Whether to enforce ad playback on timeline refresh.
+   */
+  @UnstableApi
+  void setEnforceAdPlaybackOnTimelineRefresh(boolean enforceAdPlaybackOnTimelineRefresh);
 
   /**
    * Returns whether the player pauses playback at the end of each media item.

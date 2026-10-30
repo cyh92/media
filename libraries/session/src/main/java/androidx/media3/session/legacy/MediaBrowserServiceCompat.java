@@ -17,6 +17,7 @@ package androidx.media3.session.legacy;
 
 import static android.os.Looper.myLooper;
 import static androidx.annotation.RestrictTo.Scope.LIBRARY;
+import static androidx.media3.common.util.Util.convertToNullIfInvalid;
 import static androidx.media3.session.legacy.MediaBrowserProtocol.CLIENT_MSG_ADD_SUBSCRIPTION;
 import static androidx.media3.session.legacy.MediaBrowserProtocol.CLIENT_MSG_GET_MEDIA_ITEM;
 import static androidx.media3.session.legacy.MediaBrowserProtocol.CLIENT_MSG_REGISTER_CALLBACK_MESSENGER;
@@ -248,6 +249,9 @@ public abstract class MediaBrowserServiceCompat extends Service {
         String clientPackageName, int clientUid, @Nullable Bundle rootHints) {
       Bundle rootExtras = null;
       int clientPid = UNKNOWN_PID;
+      if (Build.VERSION.SDK_INT >= 28) {
+        clientPid = checkNotNull(serviceFwk).getCurrentBrowserInfo().getPid();
+      }
       if (rootHints != null && rootHints.getInt(EXTRA_CLIENT_VERSION, 0) != 0) {
         rootHints.remove(EXTRA_CLIENT_VERSION);
         messenger = new Messenger(handler);
@@ -261,7 +265,6 @@ public abstract class MediaBrowserServiceCompat extends Service {
         } else {
           rootExtrasList.add(rootExtras);
         }
-        clientPid = rootHints.getInt(EXTRA_CALLING_PID, UNKNOWN_PID);
         rootHints.remove(EXTRA_CALLING_PID);
       }
       ConnectionRecord connection =
@@ -435,7 +438,7 @@ public abstract class MediaBrowserServiceCompat extends Service {
       @Override
       public MediaBrowserService.BrowserRoot onGetRoot(
           String clientPackageName, int clientUid, @Nullable Bundle rootHints) {
-        MediaSessionCompat.ensureClassLoader(rootHints);
+        rootHints = convertToNullIfInvalid(rootHints);
         MediaBrowserServiceCompat.BrowserRoot browserRootCompat =
             MediaBrowserServiceImplApi23.this.onGetRoot(
                 clientPackageName, clientUid, rootHints == null ? null : new Bundle(rootHints));
@@ -466,7 +469,9 @@ public abstract class MediaBrowserServiceCompat extends Service {
     }
 
     public void onLoadChildren(
-        String parentId, final ResultWrapper<List<Parcel>> resultWrapper, final Bundle options) {
+        String parentId,
+        final ResultWrapper<List<Parcel>> resultWrapper,
+        @Nullable Bundle options) {
       final Result<List<MediaBrowserCompat.MediaItem>> result =
           new Result<List<MediaBrowserCompat.MediaItem>>(parentId) {
             @Override
@@ -533,10 +538,10 @@ public abstract class MediaBrowserServiceCompat extends Service {
       @Override
       public void onLoadChildren(
           String parentId, Result<List<MediaBrowser.MediaItem>> result, Bundle options) {
-        MediaSessionCompat.ensureClassLoader(options);
+        Bundle optionsForCallback = convertToNullIfInvalid(options);
         curConnection = connectionFromFwk;
         MediaBrowserServiceImplApi26.this.onLoadChildren(
-            parentId, new ResultWrapper<>(result), options);
+            parentId, new ResultWrapper<>(result), optionsForCallback);
         curConnection = null;
       }
     }
@@ -591,13 +596,7 @@ public abstract class MediaBrowserServiceCompat extends Service {
       Bundle data = msg.getData();
       data.setClassLoader(checkNotNull(MediaBrowserCompat.class.getClassLoader()));
       data.putInt(DATA_CALLING_UID, Binder.getCallingUid());
-      int pid = Binder.getCallingPid();
-      if (pid > 0) {
-        data.putInt(DATA_CALLING_PID, pid);
-      } else if (!data.containsKey(DATA_CALLING_PID)) {
-        // If the MediaBrowserCompat didn't send its PID, then put UNKNOWN_PID.
-        data.putInt(DATA_CALLING_PID, UNKNOWN_PID);
-      }
+      data.putInt(DATA_CALLING_PID, Binder.getCallingPid());
       return super.sendMessageAtTime(msg, uptimeMillis);
     }
 
@@ -1186,7 +1185,7 @@ public abstract class MediaBrowserServiceCompat extends Service {
   public void onLoadChildren(
       @Nullable String parentId,
       Result<List<MediaBrowserCompat.MediaItem>> result,
-      Bundle options) {
+      @Nullable Bundle options) {
     // To support backward compatibility, when the implementation of MediaBrowserService doesn't
     // override onLoadChildren() with options, onLoadChildren() without options will be used
     // instead, and the options will be applied in the implementation of result.onResultSent().
@@ -1393,80 +1392,80 @@ public abstract class MediaBrowserServiceCompat extends Service {
   @SuppressLint("RestrictedApi")
   void handleMessageInternal(Message msg) {
     Bundle data = msg.getData();
-    switch (msg.what) {
-      case CLIENT_MSG_ADD_SUBSCRIPTION:
-        {
-          Bundle options = data.getBundle(DATA_OPTIONS);
-          MediaSessionCompat.ensureClassLoader(options);
+    try {
+      switch (msg.what) {
+        case CLIENT_MSG_ADD_SUBSCRIPTION:
+          {
+            Bundle options = convertToNullIfInvalid(data.getBundle(DATA_OPTIONS));
 
-          serviceBinderImpl.addSubscription(
+            serviceBinderImpl.addSubscription(
+                data.getString(DATA_MEDIA_ITEM_ID),
+                data.getBinder(DATA_CALLBACK_TOKEN),
+                options,
+                new ServiceCallbacksCompat(msg.replyTo));
+            break;
+          }
+        case CLIENT_MSG_REMOVE_SUBSCRIPTION:
+          serviceBinderImpl.removeSubscription(
               data.getString(DATA_MEDIA_ITEM_ID),
               data.getBinder(DATA_CALLBACK_TOKEN),
-              options,
               new ServiceCallbacksCompat(msg.replyTo));
           break;
-        }
-      case CLIENT_MSG_REMOVE_SUBSCRIPTION:
-        serviceBinderImpl.removeSubscription(
-            data.getString(DATA_MEDIA_ITEM_ID),
-            data.getBinder(DATA_CALLBACK_TOKEN),
-            new ServiceCallbacksCompat(msg.replyTo));
-        break;
-      case CLIENT_MSG_GET_MEDIA_ITEM:
-        serviceBinderImpl.getMediaItem(
-            data.getString(DATA_MEDIA_ITEM_ID),
-            data.getParcelable(DATA_RESULT_RECEIVER),
-            new ServiceCallbacksCompat(msg.replyTo));
-        break;
-      case CLIENT_MSG_REGISTER_CALLBACK_MESSENGER:
-        {
-          @Nullable Bundle rootHints = data.getBundle(DATA_ROOT_HINTS);
-          MediaSessionCompat.ensureClassLoader(rootHints);
-
-          serviceBinderImpl.registerCallbacks(
-              new ServiceCallbacksCompat(msg.replyTo),
-              data.getString(DATA_PACKAGE_NAME),
-              data.getInt(DATA_CALLING_PID),
-              data.getInt(DATA_CALLING_UID),
-              rootHints);
-          break;
-        }
-      case CLIENT_MSG_UNREGISTER_CALLBACK_MESSENGER:
-        serviceBinderImpl.unregisterCallbacks(new ServiceCallbacksCompat(msg.replyTo));
-        break;
-      case CLIENT_MSG_SEARCH:
-        {
-          @Nullable Bundle searchExtras = data.getBundle(DATA_SEARCH_EXTRAS);
-          MediaSessionCompat.ensureClassLoader(searchExtras);
-
-          serviceBinderImpl.search(
-              data.getString(DATA_SEARCH_QUERY),
-              searchExtras,
+        case CLIENT_MSG_GET_MEDIA_ITEM:
+          serviceBinderImpl.getMediaItem(
+              data.getString(DATA_MEDIA_ITEM_ID),
               data.getParcelable(DATA_RESULT_RECEIVER),
               new ServiceCallbacksCompat(msg.replyTo));
           break;
-        }
-      case CLIENT_MSG_SEND_CUSTOM_ACTION:
-        {
-          @Nullable Bundle customActionExtras = data.getBundle(DATA_CUSTOM_ACTION_EXTRAS);
-          MediaSessionCompat.ensureClassLoader(customActionExtras);
-
-          serviceBinderImpl.sendCustomAction(
-              data.getString(DATA_CUSTOM_ACTION),
-              customActionExtras,
-              data.getParcelable(DATA_RESULT_RECEIVER),
-              new ServiceCallbacksCompat(msg.replyTo));
+        case CLIENT_MSG_REGISTER_CALLBACK_MESSENGER:
+          {
+            @Nullable Bundle rootHints = convertToNullIfInvalid(data.getBundle(DATA_ROOT_HINTS));
+            serviceBinderImpl.registerCallbacks(
+                new ServiceCallbacksCompat(msg.replyTo),
+                data.getString(DATA_PACKAGE_NAME),
+                data.getInt(DATA_CALLING_PID),
+                data.getInt(DATA_CALLING_UID),
+                rootHints);
+            break;
+          }
+        case CLIENT_MSG_UNREGISTER_CALLBACK_MESSENGER:
+          serviceBinderImpl.unregisterCallbacks(new ServiceCallbacksCompat(msg.replyTo));
           break;
-        }
-      default:
-        Log.w(
-            TAG,
-            "Unhandled message: "
-                + msg
-                + "\n  Service version: "
-                + SERVICE_VERSION_CURRENT
-                + "\n  Client version: "
-                + msg.arg1);
+        case CLIENT_MSG_SEARCH:
+          {
+            @Nullable
+            Bundle searchExtras = convertToNullIfInvalid(data.getBundle(DATA_SEARCH_EXTRAS));
+            serviceBinderImpl.search(
+                data.getString(DATA_SEARCH_QUERY),
+                searchExtras,
+                data.getParcelable(DATA_RESULT_RECEIVER),
+                new ServiceCallbacksCompat(msg.replyTo));
+            break;
+          }
+        case CLIENT_MSG_SEND_CUSTOM_ACTION:
+          {
+            @Nullable
+            Bundle customActionExtras =
+                convertToNullIfInvalid(data.getBundle(DATA_CUSTOM_ACTION_EXTRAS));
+            serviceBinderImpl.sendCustomAction(
+                data.getString(DATA_CUSTOM_ACTION),
+                customActionExtras,
+                data.getParcelable(DATA_RESULT_RECEIVER),
+                new ServiceCallbacksCompat(msg.replyTo));
+            break;
+          }
+        default:
+          Log.w(
+              TAG,
+              "Unhandled message: "
+                  + msg
+                  + "\n  Service version: "
+                  + SERVICE_VERSION_CURRENT
+                  + "\n  Client version: "
+                  + msg.arg1);
+      }
+    } catch (RuntimeException e) {
+      Log.w(TAG, "Failed to handle message due to malformed Bundle", e);
     }
   }
 

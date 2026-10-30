@@ -73,13 +73,12 @@ internal class ProgressStateJob(
     }
     updateJob?.cancel()
     if (player.isCommandAvailable(Player.COMMAND_GET_CURRENT_MEDIA_ITEM) && shouldScheduleTask()) {
-      updateJob =
-        scope.launch {
-          while (isActive) {
-            smartDelay()
-            scheduledTask()
-          }
+      updateJob = scope.launch {
+        while (isActive) {
+          smartDelay()
+          scheduledTask()
         }
+      }
     }
   }
 
@@ -139,5 +138,6 @@ internal fun isReadyOrBuffering(player: Player): Boolean =
 
 // Taking highest frame rate as 120fps, interval is 1000/120
 @UnstableApi const val MIN_UPDATE_INTERVAL_MS = 8L
+@UnstableApi
 @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
 const val FALLBACK_UPDATE_INTERVAL_MS = 1000L
